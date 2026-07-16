@@ -2,13 +2,13 @@ bits 16
 org 0x7C00
 
 _start:
-    mov [bootdrive], dl ; bios записывает номер диска в dl регистр
-
     xor ax, ax ; устанавливаем сегменты
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp,0x6ff8 ; устанавливаем стек
+    mov sp,0x7BF8 ; устанавливаем стек
+
+    mov [bootdrive], dl ; bios записывает номер диска в dl регистр
 
     in al, 0x92 ; включаем адресную шину a20
     or al, 2
@@ -22,32 +22,13 @@ _start:
 
     call get_memory_map ; фукнция получения карты памяти
 
-    cli ; отключаем прервания для безопасности
-    lgdt [gdt_descriptor] ; загружаем gdt
-    mov eax, cr0 ; включаем защищенный режим
-    or eax, 1
-    mov cr0, eax
+    cli
+    mov bx, 0xDEAD; даем знать что мы из загрузчика
+    jmp switch_mem_mode
 
-    jmp 0x8:.init ; делаем длинный прыжок
-
-
-[bits 32]
-.init:
-    mov ax, 0x10 ; устанавливаем 32х битные сегменты(32bit data)
-    mov ds, ax
-    mov es, ax
-    mov gs, ax
-    mov ss, ax
-    mov fs, ax
-
-    mov esp, [saved_esp] ; устанавливаем 32х битный стек
-    lidt [saved_idt] ; загружаем таблицу прерываний
-
-    jmp 0x8000 ; прыжок в загруженное ранее ядро
 
 [bits 16]
 get_memory_map:
-    mov word [0x5000],0 ; резервируем место под счетчик количество записей карты памяти
     mov di, 0x5004 ; откуда начнутся записи в карте памяти
     xor bp, bp ; счетчик записей
     xor ebx, ebx ; согласно документации обнуляем ebx перед циклом
@@ -78,8 +59,8 @@ get_memory_map:
 
 
 saved_esp:
- dd 0xFF00 ; указатель на стек
-saved_idt: 
+ dd 0x6ff8 ; указатель на стек
+saved_idt:
  dw end_idt-start_idt-1 ; размер idt
  dd start_idt ; начало idt
 
@@ -100,7 +81,7 @@ align 16
 dap:
  db 0x10	;размер структуры(всегда 0x10)
  db 0		;всегда 0
- dw 8       ;количество секторов, которые мы читаем. в байтах 8*512=4k
+count: dw 64      ;количество секторов, которые мы читаем. в байтах 64*512=32k
 offset: dw 0;адрес буфера
 segm: dw 0x800;и сегмент буфера
 lba: dq 1;адрес в диске
@@ -109,7 +90,9 @@ bootcall: db 0;номер boot вызова
 bootdrive: db 0;номер загрузочного диска
 
 gdt:
- dq 0; первая запись в gdt ВСЕГДА 0
+ dw gdt_end-gdt -1 ; размер gdt
+ dd gdt; начало gdt
+ dw 0; padding
 
  ;32bit code - сегмент 0x8
  dw 0xFFFF ; конец
@@ -140,20 +123,21 @@ gdt:
  db 0x92
  db 0; флаги 16ти битного режима
  db 0
-gdt_descriptor:
- dw gdt_descriptor-gdt -1 ; размер gdt
- dd gdt; начало gdt
+gdt_end:
+
 
 
 
 
 [bits 32]
-bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buffer
-                ; if al = 0, bootcall_writescreen, ebx= symbols, ecx = buffer
+bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buffer, dx = count
+                    ; if al = 0, bx=0 bootcall_writescreen, ecx = buffer, dx = count
+                    ; if al = 0, bx!=0 bootcall_selectvideomode, bx=mode
     cli; отключаем прерывания для безопасности
 
     mov [bootcall], al; сохраняем номер операции
     mov [lba], ebx;сохраняем ebx
+    mov [count], dx;сохраняем dx
 
     mov eax, ecx ; ковертируем адрес буфера в сегмент и оффсет
     shr eax, 4
@@ -174,7 +158,6 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov es, bx
     mov ss, bx
 
-
     mov eax, cr0; переходим в реальный режим
     and eax, ~1
     mov cr0, eax
@@ -187,43 +170,62 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov fs, bx
     mov gs, bx
     mov ss, bx
-    mov sp,0x6ff8; устанавливаем стек
+    mov sp,0x7BF8; устанавливаем стек
     lidt [real_idt]; загружаем таблицу прерываний реального режима
 
 
     mov ah, [bootcall];читаем из памяти код операции
     cmp ah, 0
     jne .disk; если 0, то это чтение. иначе дисковая операция
-.print:
-    mov si, [offset]; записываем в si оффсет, а в gs регистр сегмент
-    mov ax, [segm]
-    mov gs, ax
 
+    mov di, [offset]; записываем в di оффсет, а в es сегмент. во всех операциях с дисплеем они используются
+    mov ax, [segm]
+    mov es, ax
+
+    mov bx, [lba] ; если второй аргумент 0, то это вывод на экран, иначе переключение режима
+    cmp bx, 0
+    je .print
+    sti
+.switch_mode:
+    mov ax, 0x4F01 ; получение информации об режиме
     mov cx, [lba]
+    int 0x10; прерывание биос
+
+    mov ax, 0x4F02; переключение режима
+    mov bx, [lba]
+    or bx, 0x4000
+    int 0x10
+    cli
+    jmp .end
+
+.print:
+    mov cx, [count]
     jcxz .end
 .loop:
     mov ah, 0x0e
-    mov al, [gs:si]; выводим символ из gs*16+si
+    mov al, [es:di]; выводим символ из es*16+di
     xor bx, bx
     sti; временно включаем прерывания
     int 0x10; прерывание биос
     cli; опять отключаем
 
-    inc si
+    inc di
     dec cx
     jnz .loop;повтор
     jmp .end
 
 .disk:
     mov si, dap ; таблица с данными о том, что читаем
-    mov ax, 0x4200 ; операция чтения
+    mov ah, [bootcall] ; операция
+    mov al, 0
     mov dl, [bootdrive] ; номер диска
     sti; временно включаем прерывания
     int 0x13 ; прерывание биос
     cli; опять отключаем
 
 .end:
-    lgdt [gdt_descriptor];опять переходим в 32х битный защищенный режим
+switch_mem_mode:
+    lgdt [gdt];опять переходим в 32х битный защищенный режим
     mov eax, cr0
     or eax, 1
     mov cr0, eax
@@ -241,7 +243,13 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
 
     mov esp, [saved_esp]; восстанавливаем стек
     lidt [saved_idt]; и idt
-    popad; и регистры
+
+    cmp bx, 0xDEAD; проверяем вызываемся из кода загрузчика или из прерывания
+    jne .int
+    jmp 0x8000 ; если из кода загрузчика, то прыгаем в начало ядра
+
+.int: ; если из прерывания
+    popad; восстанавливаем регистры
 
     iret; возврат из прерывания
 

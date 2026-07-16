@@ -17,3 +17,7 @@ void diskread(u32 lba, char* buffer, u32 count){
 void diskwrite(u32 lba, char* buffer, u32 count){
     bootcall(0x43, lba, buffer, count);
 }
+
+void set_video_mode(char *buffer, int videomode){
+    bootcall(0,videomode,buffer,0);
+}
