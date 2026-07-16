@@ -2,11 +2,13 @@ bits 16
 org 0x7C00
 
 _start:
+    cld ; сброс EFLAGS
+
     xor ax, ax ; устанавливаем сегменты
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp,0x7BF8 ; устанавливаем стек
+    mov sp,0x7BF0 ; устанавливаем стек
 
     mov [bootdrive], dl ; bios записывает номер диска в dl регистр
 
@@ -22,21 +24,20 @@ _start:
 
     call get_memory_map ; фукнция получения карты памяти
 
-    cli
     mov bx, 0xDEAD; даем знать что мы из загрузчика
     jmp switch_mem_mode
 
 
 [bits 16]
 get_memory_map:
+    mov word [0x5000], 0; счетчик записей
     mov di, 0x5004 ; откуда начнутся записи в карте памяти
-    xor bp, bp ; счетчик записей
     xor ebx, ebx ; согласно документации обнуляем ebx перед циклом
 
 .loop:
     mov eax, 0xE820 ; магическое число по документации
     mov edx, 0x534D4150 ; 2ое магическое число по документации
-    mov ecx, 24 ; размер записи(тоже по документации)
+    mov ecx, 20 ; размер записи(тоже по документации)
     int 0x15 ; прерывание биос
 
     jc .done ; проверяем carry flag, если он установлен, то карта памяти закончена(или произошла ошибка)
@@ -45,21 +46,20 @@ get_memory_map:
 
     jcxz .skip_entry ; если cx 0(если запись равна 0 байт), то пропускаем прибавление
 
-    add di, 24 ; прибавляем к указателю на текущую запись размер записи
-    inc bp ; прибавляем счетчик записей
+    add di, 20 ; прибавляем к указателю на текущую запись размер записи
+    inc word [0x5000] ; прибавляем счетчик записей
 
 .skip_entry:
     test ebx, ebx ; если ebx 0, то карта памяти закончена
     jne .loop
 
 .done:
-    mov [0x5000], bp ; записываем счетчик в память
     ret
 
 
 
 saved_esp:
- dd 0x6ff8 ; указатель на стек
+ dd 0x7800 ; указатель на стек
 saved_idt:
  dw end_idt-start_idt-1 ; размер idt
  dd start_idt ; начало idt
@@ -170,9 +170,10 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov fs, bx
     mov gs, bx
     mov ss, bx
-    mov sp,0x7BF8; устанавливаем стек
+    mov sp,0x7BF0; устанавливаем стек
     lidt [real_idt]; загружаем таблицу прерываний реального режима
 
+    sti; включаем прерывания
 
     mov ah, [bootcall];читаем из памяти код операции
     cmp ah, 0
@@ -185,7 +186,6 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov bx, [lba] ; если второй аргумент 0, то это вывод на экран, иначе переключение режима
     cmp bx, 0
     je .print
-    sti
 .switch_mode:
     mov ax, 0x4F01 ; получение информации об режиме
     mov cx, [lba]
@@ -195,7 +195,6 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov bx, [lba]
     or bx, 0x4000
     int 0x10
-    cli
     jmp .end
 
 .print:
@@ -205,9 +204,7 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov ah, 0x0e
     mov al, [es:di]; выводим символ из es*16+di
     xor bx, bx
-    sti; временно включаем прерывания
     int 0x10; прерывание биос
-    cli; опять отключаем
 
     inc di
     dec cx
@@ -219,12 +216,11 @@ bootcall_interrupt: ; bootcall_diskread al = diskoperation, ebx = lba, ecx = buf
     mov ah, [bootcall] ; операция
     mov al, 0
     mov dl, [bootdrive] ; номер диска
-    sti; временно включаем прерывания
     int 0x13 ; прерывание биос
-    cli; опять отключаем
 
 .end:
 switch_mem_mode:
+    cli; отключаем прерывания
     lgdt [gdt];опять переходим в 32х битный защищенный режим
     mov eax, cr0
     or eax, 1
@@ -253,5 +249,16 @@ switch_mem_mode:
 
     iret; возврат из прерывания
 
-times 510 - ($-$$) db 0
+times 446 - ($-$$) db 0
+
+; таблица разделов
+db 0x80 ; активный
+db 0,2,0;chs start
+db 0x83;тип раздела linux/raw
+db 1,2, 0;конец chs
+dd 1 ; начало lba
+dd 64; конец lba
+
+times 48 db 0
+
 dw 0xAA55

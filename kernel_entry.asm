@@ -8,9 +8,11 @@ _start:
     jmp $
 
 bootcall:
-    mov eax, [esp+4]
-    mov ebx, [esp+8]
-    mov ecx, [esp+12]
-    mov edx, [esp+16]
+    push ebx
+    mov eax, [esp+8]
+    mov ebx, [esp+12]
+    mov ecx, [esp+16]
+    mov edx, [esp+20]
     int 0
+    pop ebx
     ret
